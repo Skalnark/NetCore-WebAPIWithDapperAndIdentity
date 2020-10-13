@@ -1,0 +1,352 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage{minted}
+
+\title{HOW TO BUILD A WEB API WITH .NET CORE AND DAPPER}
+\author{skalnark}
+\date{October 2020}
+
+\begin{document}
+
+\maketitle
+
+\section{Autenticação}
+
+\begin{enumerate}
+    \item Criar projeto vazio
+    
+    \item Criar projeto de API
+    
+    \item Criar o databasecontext\\
+        Esse item deriva da classe IdentityDbContext
+        
+    \item Adicionar isso no startup.cs:
+    
+    \begin{minted}{csharp}
+    
+services.AddIdentity<IdentityUser, IdentityRole>()
+    .AddEntityFrameworkStores<DatabaseContext>()
+    .AddDefaultTokenProvider();
+    \end{minted}
+
+    \item Adicionar os midlewares de autenticação e autorização no Configure:
+    
+    \begin{minted}{csharp}
+app.UseAuthentication();
+app.UseAuthorization();
+    \end{minted}
+
+    \item Adicionar construtor padrão vazio e o seguinte construtor no DatabaseContext:
+    
+    \begin{minted}{csharp}
+public DatabaseContext(DbContextOptions<DatabaseContext> options)
+        : base(options)
+    {  }
+    \end{minted}
+    \item Adicionar o seguinte no ConfigureServices da Startup.cs:
+    
+    \begin{minted}{csharp}
+services.AddDbContext<DatabaseContext>(options =>
+options.UseNpgsql(Configuration.GetConnectionString("DefaultConnection")));
+    \end{minted}
+    
+    \item Adicionar a seguinte configuração no appsettings.json:
+    
+    \begin{minted}{json}
+  "ConnectionStrings": {
+    "DefaultConnectioon": "Host=127.0.0.1;Port=5432;Pooling=true;
+    Database=NOME DO BANCO DE DADOS;
+    Username=postgres;Password=password"
+  },
+    \end{minted}
+    
+    \item Criar UserDTO com email, senha e confirma senha
+    
+    \item Criar Controller de autorização com a seguintes variáveis:
+    
+    \begin{minted}{csharp}
+private readonly UserManager<IdentityUser> userManager;
+private readonly SignInManager<IdentityUser> signInManager;
+private readonly IConfiguration configuration;
+    \end{minted}
+    
+    \item Criar método Post RegisterUser com o seguinte corpo:
+    
+    \begin{minted}{csharp}
+[HttpPost("register")]
+public async Task<ActionResult> RegisterUser([FromBody]UserDTO model)
+{
+    var user = new IdentityUser
+    {
+        UserName = model.Email,
+        Email = model.Email,
+        EmailConfirmed = true
+    };
+
+    var result = await userManager.CreateAsync(user, model.Password);
+
+    if (!result.Succeeded)
+    {
+        return BadRequest(result.Errors);
+    }
+
+    await signInManager.SignInAsync(user, false);
+
+    return Ok(TokenGenerator(model));
+}
+    \end{minted}
+    
+    \item Add Login:
+    
+    \begin{minted}{csharp}
+[HttpPost("login")]
+public async Task<ActionResult> Login([FromBody] UserDTO model)
+{
+    var result = await signInManager.PasswordSignInAsync(
+    userName: model.Email, password: model.Password, isPersistent: false, false);
+
+    if (result.Succeeded)
+    {
+        return Ok(TokenGenerator(model));
+    }
+
+    ModelState.AddModelError(string.Empty, "incorrect email or password");
+    return BadRequest(ModelState);
+}
+    \end{minted}
+    
+    \item Instalar o \textbf{System.IdentityModel.Tokens.Jwt}
+    
+    \item Adicionar no appsettings.json:
+    
+    \begin{minted}{json}
+    "Jwt": {
+      "Key": "CHAVE SECRETA PODE GERAR COM date | openssl sha3-256"
+    },
+    "TokenConfiguration": {
+      "Audiece": "Nome_Audience",
+      "Issuer": "Nome_Issuer",
+      "ExpireHours": 2
+    }
+    \end{minted}
+    
+    \item Criar DTO UserToken com o seguinte código:
+    \begin{minted}{csharp}
+    public class UserToken
+    {
+        public bool Authenticated { get; set; }
+        public DateTime Expiration { get; set; }
+        public string Token { get; set; }
+        public string Message { get; set; }
+    }
+    \end{minted}
+    
+    \item Criar o método TokenGenerator com o seguinte código:
+    
+    \begin{minted}{csharp}
+    private UserToken TokenGenerator(UserDTO model)
+        {
+            var claims = new[]
+            {
+                new Claim(JwtRegisteredClaimNames.UniqueName, model.Email)
+            };
+
+            var key = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(configuration["Jwt:Key"]));
+
+            var credentials = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var expirationTime = configuration["TokenConfiguration:ExpireHours"];
+            var expiration = DateTime.UtcNow.AddHours(double.Parse(expirationTime));
+
+            JwtSecurityToken token = new JwtSecurityToken(
+                issuer: configuration["TokenConfiguration:Issuer"],
+                audience: configuration["TokenConfiguration:Audience"],
+                claims: claims,
+                expires: expiration,
+                signingCredentials: credentials
+                );
+
+            return new UserToken()
+            {
+                Authenticated = true,
+                Token = new JwtSecurityTokenHandler().WriteToken(token),
+                Expiration = expiration,
+                Message = "New JWT token"
+            };
+        }
+    \end{minted}
+    
+    \item Instalar o \textbf{Microsoft.AspNetCore.Authentication.JwtBearer}
+    
+    \item importar o \textbf{Microsoft.IdentityModel.Tokens}
+    
+    \item Inserir depois do AddIdentity:
+    
+    \begin{minted}{csharp}
+services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidAudience = Configuration["TokenConfiguration:Audience"],
+                ValidIssuer = Configuration["TokenConfiguration:Issuer"],
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(
+                    Encoding.UTF8.GetBytes(Configuration["Jwt:Key"]))
+                });
+    \end{minted}
+    
+    \item Criar Migration \textbf{Add-Migration Identity}
+    
+    \item Atualizar banco de dados \textbf{Update-Database}
+    
+    \item Para autenticar operações em um controller, é necessário adicionar o seguinte: \\
+    \textbf{
+        [Authorize(AuthenticationSchemes = "Bearer")]}
+\end{enumerate}
+
+\section{Aplicação}
+
+\begin{enumerate}
+
+    \item Gerar o banco de dados
+    
+    \item Criar as entidades
+
+    \item Adicionar DbSet<Entidade> no DatabaseContext
+    
+    \item Criar IRepository com o seguinte código:
+    
+    \begin{minted}{csharp}
+public interface IRepository<T>
+    where T : class
+{
+    Task<IEnumerable<T>> Get();
+    Task<T> Get(int id);
+
+    Task<int> Add(T entity);
+    Task<int> Update(T entity);
+    void Delete(int id);
+}
+    \end{minted}
+    
+    \item Criar uma implementação do repository para cada entidade contendo as seguintes dependencias:
+    
+    \begin{minted}{csharp}
+
+private readonly IConfiguration _configuration;
+    \end{minted}
+    
+    \item Instalar o Dapper
+    
+    \item Exemplo de Add:
+    \begin{minted}{csharp}
+public async Task<int> Add(Product entity)
+    {
+        string sql = "INSERT INTO Products (ProductName, Price, CategoryId) VALUES (@ProductName, @Price, @CategoryId) RETURNING ProductId";
+
+        using var connection = new Npgsql.NpgsqlConnection(_configuration.GetConnectionString("DefaultConnection"));
+        connection.Open();
+
+        return await connection.ExecuteAsync(sql, entity);
+    }
+    \end{minted}
+    
+    \item Exemplo de Delete:
+    \begin{minted}{csharp}
+public async void Delete(int id)
+    {
+        var sql = "DELETE FROM Products WHERE ProductId = @ProductId";
+
+        using var connection = new Npgsql.NpgsqlConnection(_configuration.GetConnectionString("DefaultConnection"));
+        await connection.OpenAsync();
+        var result = connection.QueryAsync<Product>(sql, new { ProductId = id });
+    }
+    \end{minted}
+    
+    \item Exemplo de Get:
+    \begin{minted}{csharp}
+public async Task<IEnumerable<Product>> Get()
+{
+    string sql = "SELECT * FROM Products";
+    using var connection = new NpgsqlConnection(_configuration.GetConnectionString("DefaultConnection"));
+    await connection.OpenAsync();
+
+    return await connection.QueryAsync<Product>(sql);
+}
+
+public async Task<Product> Get(int id)
+{
+    string sql = "SELECT * FROM Products WHERE ProductId = @ProductId";
+
+    using var connection = new NpgsqlConnection(_configuration.GetConnectionString("DefaultConnection"));
+    await connection.OpenAsync();
+
+    var result = connection.QueryAsync<Product>(sql, new { ProductId = id }).Result.FirstOrDefault();
+
+    return result;
+}
+    \end{minted}
+
+    \item Exemplo de Update:
+    \begin{minted}{csharp}
+public async Task<int> Update(Product entity)
+{
+    var sql = @"UPDATE Product SET " +
+        "ProductName = @ProductName, " +
+        "Price = @Price, " +
+        "CategoryId = @CategoryId, " +
+        "Phone = @Phone " +
+        "WHERE ProductId = @ProductId";
+
+    using var connection = new NpgsqlConnection(_configuration.GetConnectionString("DefaultConnection"));
+    await connection.OpenAsync();
+
+    return await connection.ExecuteAsync(sql, entity);
+}
+    \end{minted}
+    
+    \item Implementar o IUnitOfWork e UnitOfWork com o seguinte código:
+    
+    \begin{minted}{csharp}
+public interface IUnitOfWork
+{
+    IRepositoryProduct Product { get; }
+    IRepositoryCategory Categories { get; }
+    Task Commit();
+    void Dispose();
+}
+
+public class UnitOfWork : IUnitOfWork
+{
+    private readonly IConfiguration _configuration;
+    private readonly DatabaseContext _context;
+    private RepositoryPerson _people;
+
+    public UnitOfWork(IConfiguration configuration,DatabaseContext context)
+    {
+        _context = context;
+        _configuration = configuration;
+    }
+
+    public IRepositoryPerson People
+    => _people ??= new RepositoryPerson(_configuration, _context);
+        
+    public async Task Commit() => await _context.SaveChangesAsync();
+
+    public void Dispose() => _context.Dispose();
+}
+
+    \end{minted}
+    
+    \item Adicionar no Startup:
+    \begin{minted}{csharp}
+services.AddTransient<IRepositoryProduct, RepositoryProduct>();
+services.AddTransient<IRepositoryCategory, RepositoryCategory>();
+services.AddTransient<IUnitOfWork, UnitOfWork>();
+    \end{minted}
+\end{enumerate}
+\end{document}
